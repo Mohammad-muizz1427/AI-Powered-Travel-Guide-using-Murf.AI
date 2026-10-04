@@ -4,8 +4,16 @@ from google import genai
 import tempfile
 import requests
 import base64
+import os 
+from dotenv import load_dotenv
+load_dotenv()
 
 app = Flask(__name__)
+CORS(app)
+api_key = os.getenv("API_GEMINI")
+api_murfai = os.getenv("API_MURFAI")
+client = genai.Client(api_key=api_key)
+
 PROMPTS = {
     "Summary": """
 You are a professional tourist guide.
@@ -40,5 +48,71 @@ Limit the response to around 400 words.
 Respond ONLY in {language}.
 """
 }
- 
-app.run(debug=True)
+
+def generate_speech(text, voice_id, locale):
+    temp_audio = tempfile.NamedTemporaryFile(
+        suffix=".mp3",
+        delete=False
+    )
+    url = "https://global.api.murf.ai/v1/speech/stream"
+    headers = {
+        "api-key": api_murfai,
+        "Content-Type": "application/json"
+    }
+    data = {
+    "voice_id": voice_id,
+    "text": text,
+    "locale": locale,
+    "model": "FALCON",
+    "format": "MP3",
+    "sampleRate": 24000,
+    "channelType": "MONO"
+    }
+
+    response = requests.post(
+        url,
+        headers=headers,
+        json=data
+    )
+    if response.status_code == 200:
+        with open(temp_audio.name, "wb") as f:
+            for chunk in response.iter_content(chunk_size=1024):
+                if chunk:
+                    f.write(chunk)
+    else:
+        print(f"Error: {response.status_code}")
+
+    return temp_audio
+
+
+def generate_description(place, answer_type, language):
+    prompt = PROMPTS[answer_type].format(place=place, language=language)
+    response = client.models.generate_content(
+        model="gemini-3.1-flash-lite",
+        contents=prompt
+    )
+    return response.text
+    
+@app.route("/generate-audio-guide", methods=["POST"])
+def generate_audio_guide():
+    data = request.json
+    place = data["place"]
+    answer_type = data["answerType"]
+    language = data["language"]
+    voice_id = data["voiceId"]
+    locale = data["locale"]
+
+    text_description = generate_description(place, answer_type, language)
+    
+    audio_path = generate_speech(text_description,voice_id,locale)
+
+    audio_bytes = open(audio_path.name, "rb").read()
+    encoded_audio = base64.b64encode(audio_bytes).decode("utf-8")
+
+    return {
+        "description": text_description,
+        "audioBase64": encoded_audio
+    }
+
+if __name__ == "__main__":
+    app.run(debug=True)
