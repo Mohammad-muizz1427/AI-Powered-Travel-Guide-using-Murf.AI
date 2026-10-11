@@ -125,7 +125,7 @@ voiceButtons.forEach(btn => {
 
 // Generate Audio guide button Logic
 
-const GENERATE_AUDIO_GUIDE_API_URL = "https://YOUR-APP.onrender.com/generate-audio-guide";
+const GENERATE_AUDIO_GUIDE_API_URL = "https://ai-powered-travel-guide-using-murf-ai.onrender.com/generate-audio-guide";
 
 generateButton.addEventListener('click', async () => {
   generateButton.disabled = true;
