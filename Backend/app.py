@@ -1,15 +1,20 @@
-from flask import Flask, jsonify, request
+from flask import Flask, request, jsonify
 from flask_cors import CORS
 from google import genai
-import tempfile
 import requests
 import base64
-import os 
+import os
 from dotenv import load_dotenv
+
 load_dotenv()
 
 app = Flask(__name__)
-CORS(app)
+
+# After deploying the frontend, set FRONTEND_URL on Render
+# (example: https://your-app.vercel.app). Until then it allows all origins.
+FRONTEND_URL = os.getenv("FRONTEND_URL", "*")
+CORS(app, origins=FRONTEND_URL)
+
 api_key = os.getenv("API_GEMINI")
 api_murfai = os.getenv("API_MURFAI")
 client = genai.Client(api_key=api_key)
@@ -49,70 +54,88 @@ Respond ONLY in {language}.
 """
 }
 
+
 def generate_speech(text, voice_id, locale):
-    temp_audio = tempfile.NamedTemporaryFile(
-        suffix=".mp3",
-        delete=False
-    )
+    """Returns MP3 bytes, or None if Murf fails."""
     url = "https://global.api.murf.ai/v1/speech/stream"
     headers = {
         "api-key": api_murfai,
         "Content-Type": "application/json"
     }
     data = {
-    "voice_id": voice_id,
-    "text": text,
-    "locale": locale,
-    "model": "FALCON",
-    "format": "MP3",
-    "sampleRate": 24000,
-    "channelType": "MONO"
+        "voice_id": voice_id,
+        "text": text,
+        "locale": locale,
+        "model": "FALCON",
+        "format": "MP3",
+        "sampleRate": 24000,
+        "channelType": "MONO"
     }
 
-    response = requests.post(
-        url,
-        headers=headers,
-        json=data
-    )
-    if response.status_code == 200:
-        with open(temp_audio.name, "wb") as f:
-            for chunk in response.iter_content(chunk_size=1024):
-                if chunk:
-                    f.write(chunk)
-    else:
-        print(f"Error: {response.status_code}")
+    try:
+        response = requests.post(url, headers=headers, json=data, timeout=90)
+    except requests.RequestException as e:
+        print(f"Murf request error: {e}")
+        return None
 
-    return temp_audio
+    if response.status_code != 200:
+        print(f"Murf error {response.status_code}: {response.text[:300]}")
+        return None
+
+    return response.content
 
 
 def generate_description(place, answer_type, language):
     prompt = PROMPTS[answer_type].format(place=place, language=language)
     response = client.models.generate_content(
-        model="gemini-3.1-flash-lite",
+        model="gemini-3.1-flash-lite",  # [Unverified] confirm this name in Google AI Studio
         contents=prompt
     )
     return response.text
-    
+
+
+@app.route("/")
+def health():
+    return {"status": "ok"}
+
+
 @app.route("/generate-audio-guide", methods=["POST"])
 def generate_audio_guide():
-    data = request.json
-    place = data["place"]
-    answer_type = data["answerType"]
-    language = data["language"]
-    voice_id = data["voiceId"]
-    locale = data["locale"]
+    data = request.get_json(silent=True) or {}
 
-    text_description = generate_description(place, answer_type, language)
-    
-    audio_path = generate_speech(text_description,voice_id,locale)
+    place = data.get("place")
+    answer_type = data.get("answerType")
+    language = data.get("language")
+    voice_id = data.get("voiceId")
+    locale = data.get("locale")
 
-    audio_bytes = open(audio_path.name, "rb").read()
-    encoded_audio = base64.b64encode(audio_bytes).decode("utf-8")
+    if not all([place, answer_type, language, voice_id, locale]):
+        return jsonify({"error": "Missing required fields"}), 400
 
-    return {
+    if answer_type not in PROMPTS:
+        return jsonify({"error": "Invalid answerType"}), 400
+
+    try:
+        text_description = generate_description(place, answer_type, language)
+    except Exception as e:
+        print(f"Gemini error: {e}")
+        return jsonify({"error": "Text generation failed"}), 502
+
+    audio_bytes = generate_speech(text_description, voice_id, locale)
+
+    if audio_bytes is None:
+        # Still send the text so the user sees something
+        return jsonify({
+            "description": text_description,
+            "audioBase64": None,
+            "error": "Speech generation failed"
+        }), 200
+
+    return jsonify({
         "description": text_description,
-        "audioBase64": encoded_audio
-    }
+        "audioBase64": base64.b64encode(audio_bytes).decode("utf-8")
+    })
+
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(debug=False, port=5000)
